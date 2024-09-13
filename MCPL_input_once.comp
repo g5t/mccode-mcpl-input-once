@@ -26,46 +26,70 @@
 * polarisationuse: [ ]  If !=0 read polarisation vectors from file.
 * Emin: [meV]           Lower energy bound. Particles found in the MCPL-file below the limit are skipped.
 * Emax: [meV]           Upper energy bound. Particles found in the MCPL-file above the limit are skipped.
+* E_smear: [1]          Relative fraction for randomness in replayed particle velocity v *= (1 + E_smear * randpm1())
+* pos_smear: [m]        Maximum extent of random position for replayed particles
+* dir_smear: [deg]      Maximum deviation of random direction for replayed particles
+* always_smear: [ ]     Finite values force particle property smearing for all particles
 *
 * %E
 *******************************************************************************/
 
 DEFINE COMPONENT MCPL_input_once
 DEFINITION PARAMETERS ()
-SETTING PARAMETERS (string filename=0, polarisationuse=1, Emin=0, Emax=FLT_MAX, int preload=0)
+SETTING PARAMETERS (string filename=0, polarisationuse=1, Emin=0, Emax=FLT_MAX, E_smear=0, pos_smear=0, dir_smear=0, int always_smear=0, int preload=0)
 OUTPUT PARAMETERS ()
 DEPENDENCY "-Wl,-rpath,CMD(mcpl-config --show libdir) -LCMD(mcpl-config --show libdir) -lmcpl -ICMD(mcpl-config --show includedir)"
 
 SHARE
 %{
 #include <mcpl.h>
+
+typedef struct {
+  double x, y, z;
+  double sx, sy, sz;
+  double vx, vy, vz;
+  double e, t, p;
+} mcpl_input_once_particle_t;
+
+void mcpl_input_once_translator(const int use_polarisation, const mcpl_particle_t * input, const mcpl_input_once_particle_t * output){
+  // position in mm -> m
+  output->x = input->position[0] / 100;
+  output->y = input->position[1] / 100;
+  output->z = input->position[2] / 100;
+  // polarization is a direction, and we might ignore it
+  output->sx = (use_polarisation) ? input->polarisation[0] : 0;
+  output->sy = (use_polarisation) ? input->polarisation[1] : 0;
+  output->sz = (use_polarisation) ? input->polarisation[2] : 0;
+  // ekin in MeV -> meV; then to velocity
+  double nrm = sqrt(input->ekin  * 1e9 / VS2E); 
+  output->vx = input->direction[0] * nrm;
+  output->vy = input->direction[1] * nrm;
+  output->vz = input->direction[2] * nrm;
+  // time in msec -> sec
+  output->t = input->time  * 1e-3;
+  // probability, unitless
+  output->p = input->weight;
+}
 %}
 
 DECLARE
 %{
 mcpl_file_t inputfile;
 long long nparticles;
-long long first_particle;
-long long last_particle;
-long long read_neutrons;
-long long used_neutrons;
-DArray1d X;
-DArray1d Y;
-DArray1d Z;
-DArray1d VX;
-DArray1d VY;
-DArray1d VZ;
-DArray1d SX;
-DArray1d SY;
-DArray1d SZ;
-DArray1d E;
-DArray1d T;
-DArray1d P;
+uint64_t read_neutrons;
+uint64_t used_neutrons;
+uint64_t index;
+uint64_t maximum_index;
+uint64_t first_particle;
+int times_replayed;
+mcpl_input_once_particle_t * particles;
 %}
 
 INITIALIZE
 %{
   long long ncount;
+  uint64_t particles_per_node;
+  uint64_t last_particle;
   if(Emax<Emin){
     fprintf(stderr, "Error(%s): Nonsensical energy interval: E=[%g,%g]. Aborting.\n", NAME_CURRENT_COMP, Emin, Emax);
     exit(-1);
@@ -88,11 +112,16 @@ INITIALIZE
   }
   mcset_ncount(nparticles);
   first_particle = 0;
-  last_particle = nparticles;
+  last_particle = (uint64_t) nparticles;
 #if defined (USE_MPI)
-  long long particles_per_node = nparticles / mpi_node_count;
+  // divy up the available particles between nodes
+  particles_per_node = last_particle / mpi_node_count;
+  // ensuring at least 1 particle per node (e.g., protecting against division by negative node count)
+  if (particles_per_node < 1) particles_per_node = 1;
+  // each node has first index given by how many particles each should do
   first_particle = particles_per_node * mpi_node_rank;
-  last_particle = (mpi_node_rank == mpi_node_count - 1) ? nparticles : first_particle + particles_per_node;
+  // the last worker keeps 'nparticles' as its last particle index, to ensure the full range is covered
+  if (mpi_node_rank != mpi_node_count - 1) last_particle = first_particle + particles_per_node;
 #endif
   read_neutrons=0;
   used_neutrons=0;
@@ -101,122 +130,121 @@ INITIALIZE
   printf("OpenACC, preload implicit:\n");	    
 #endif
   // Move this node's pointer into the file to its first particle:
-  mcpl_seek(inputfile, (uint64_t) first_particle);
-  
+  // in preparation for pre-loading or first pass through TRACE
+  mcpl_seek(inputfile, first_particle);
+  // Index will track how many particles this component has accessed
+  index = 0;
+  // Which we want to check against how large it can grow, to know if we've exhausted the available particles
+  maximum_index = last_particle - first_particle;
+  particles = NULL;
   if (preload) {
-#if defined (USE_MPI)
-MPI_MASTER(
-#endif
-    printf("Preload requested, loading MCPLfile in INITIALIZE\n");
-#if defined (USE_MPI)
-);
-#endif
+    printf("Preload requested, loading MCPLfile particles (%lu, %lu] in INITIALIZE\n", (long unsigned)first_particle, (long unsigned)last_particle);
     long long no = last_particle - first_particle;
-    X = create_darr1d(no);
-    Y = create_darr1d(no);
-    Z = create_darr1d(no);
-    VX = create_darr1d(no);
-    VY = create_darr1d(no);
-    VZ = create_darr1d(no);
-    SX = create_darr1d(no);
-    SY = create_darr1d(no);
-    SZ = create_darr1d(no);
-    T = create_darr1d(no);
-    P = create_darr1d(no);
-    E = create_darr1d(no);
-  
+    particles = (mcpl_input_once_particle_t *) calloc(no, sizeof(mcpl_input_once_particle_t);
     for (long long loop=first_particle; loop < last_particle ; loop++) {
-	const mcpl_particle_t *particle;
-	particle=mcpl_read(inputfile);
-	if (particle) {
-	  if (particle->pdgcode==2112) {
-	    /* check energy range*/
-	    if ( particle->ekin>Emin*1e-9 && particle->ekin<Emax*1e-9 ) {
-	      /* Particle energy in range */
-	      X[used_neutrons]=particle->position[0];
-	      Y[used_neutrons]=particle->position[1];
-	      Z[used_neutrons]=particle->position[2];
-              SX[used_neutrons]=(polarisationuse) ? (double)particle->polarisation[0] : 0.0;
-              SY[used_neutrons]=(polarisationuse) ? (double)particle->polarisation[1] : 0.0;
-              SZ[used_neutrons]=(polarisationuse) ? (double)particle->polarisation[2] : 0.0;
-              VX[used_neutrons]=(double)particle->direction[0];
-              VY[used_neutrons]=(double)particle->direction[1];
-              VZ[used_neutrons]=(double)particle->direction[2];
-	      T[used_neutrons] = particle->time;
-	      P[used_neutrons] = particle->weight;
-	      E[used_neutrons] = particle->ekin;
-	      used_neutrons++;
-	    }
-	    read_neutrons++;
-	  }
-	}
+      const mcpl_particle_t *particle;
+      particle=mcpl_read(inputfile);
+      if (particle && particle->pdgcode==2112) {
+        if (particle->ekin>Emin*1e-9 && particle->ekin<Emax*1e-9 ) {
+          mcpl_input_once_translator(polarisationuse, particle, particles + used_neutrons++);
+          used_neutrons++;
+        }
+        read_neutrons++;
       }
-      printf("Done reading MCPL file, found %lu neutrons\n", (long unsigned)read_neutrons);
-      mcpl_close_file(inputfile);
     }
+    // keep track of 
+    maximum_index = used_neutrons;
+    printf("Done reading MCPL file (%lu, %lu], found %lu neutrons\n",
+           (long unsigned)first_particle, (long unsigned)last_particle, (long unsigned)read_neutrons);
+    mcpl_close_file(inputfile);
+  }
+  // keep track of how many times we had to replay the same MCPL input
+  times_replayed = 0;
 %}
 
 TRACE
 %{
-  double nrm;
-#ifndef OPENACC
-  const mcpl_particle_t *particle;// = (mcpl_particle_t *) calloc(sizeof(mcpl_particle_t),1);
-  if(!preload) {
-    particle = mcpl_read(inputfile);
-    if (!particle) {
-	ABSORB;
+  mcpl_input_once_particle_t * ptr;
+  ptr = NULL;
+  
+  if (index >= maximum_index){
+    // go back to the start of this worker's particles, rather than accessing out-of-range data
+    index = 0;
+    if (!preload){
+      mpl_seek(inputfile, first_particle);
     }
-    if (particle->pdgcode!=2112) {
-        /*Either no particle read, particle is not a neutron, or it has invalid energy - terminate to trigger next ray*/
+    times_replayed++;
+  }
+#ifndef OPENACC
+  // preload can only ever be false if OPENACC is not define (in which case it is the likely code path)
+  if (!preload){
+    const mcpl_particle_t *particle;// = (mcpl_particle_t *) calloc(sizeof(mcpl_particle_t),1);
+    particle = mcpl_read(inputfile);
+    index++; // track how many particles have been accessed, to ensure we don't exceed our slice of the file
+    if (!particle || particle->pdgcode != 2112) {
        ABSORB;
     }
     read_neutrons++;
-    /* check energy range*/
     if ( particle->ekin<Emin*1e-9 || particle->ekin>Emax*1e-9 ) {
-        /*Particle energy out of range - terminate to trigger next ray*/
         ABSORB;
     }
-    used_neutrons++;  
-  }
-#endif
-  // the particle _uid is offset by mpi_node_rank * ncount inside of the 'gpu_innerloop'
-  unsigned long long i=_particle->_uid - (unsigned long long) first_particle;
-  if (preload && i>=used_neutrons) {
-    ABSORB;
-  }
-#ifndef OPENACC
-  if (!preload){
-    // no-preload is only possible w/o OPENACC (and is the likely code path in that case)
-    x = particle->position[0] / 100;
-    y = particle->position[1] / 100;
-    z = particle->position[2] / 100;
-    sx = (polarisationuse) ? particle->polarisation[0] : 0;
-    sy = (polarisationuse) ? particle->polarisation[1] : 0;
-    sz = (polarisationuse) ? particle->polarisation[2] : 0;
-    nrm = sqrt(particle->ekin  * 1e9 / VS2E);
-    vx = particle->direction[0] * nrm;
-    vy = particle->direction[1] * nrm;
-    vz = particle->direction[2] * nrm;
-    t = particle->time  * 1e-3;  // msec -> sec
-    p = particle->weight;
+    mcpl_input_once_translator(polarisationuse, particle, ptr);
+    used_neutrons++;
   } else {
 #endif
-    // preload is always on for OPENACC
-    x = X[i] / 100;
-    y = Y[i] / 100;
-    z = Z[i] / 100;
-    sx = (polarisationuse) ? SX[i] : 0;
-    sy = (polarisationuse) ? SY[i] : 0;
-    sz = (polarisationuse) ? SZ[i] : 0;
-    nrm = sqrt(E[i] * 1e9 / VS2E);
-    vx = VX[i] * nrm;
-    vy = VY[i] * nrm;
-    vz = VZ[i] * nrm;
-    t = T[i] * 1e-3;
-    p = P[i];
+    ptr = particles + index++;
 #ifndef OPENACC
   }
 #endif
+  // copy from the component particle struct to the particle ray struct:
+  if (ptr == NULL) {
+    fprintf(stderr, "ERROR (%s): component particle struct pointer not set! Crash before out-of-bounds memory access.\n", NAME_CURRENT_COMP);
+    exit(-1);
+  }
+  // this could be done via memcpy if we ensure equal memory layout with the ray's struct
+  x = ptr->x;
+  y = ptr->y;
+  z = ptr->z;
+  sx = ptr->sx;
+  sy = ptr->sy;
+  sz = ptr->sz;
+  vx = ptr->vx;
+  vy = ptr->vy;
+  vz = ptr->vz;
+  t = ptr->t;
+  p = ptr->p;
+  
+  if (always_smear || times_replayed){
+    // fuzz the input
+    if (pos_smear) {
+      double tmpx, tmpy, tmpz;
+      randvec_target_circle(&tmpx, &tmpy, &tmpz, NULL, 0, 0, 1, 0);
+      NORM(tmpx, tmpy, tmpz);
+      x += tmpx * pos_smear * rand01();
+      y += tmpy * pos_smear * rand01();
+      z += tmpz * pos_smear * rand01();
+    }
+    if (E_smear) {
+      // copy behavior of MCPL_input.comp -- E_smear controls *velocity* randomness
+      double fraction;
+      fraction = 1.0 + E_smear * randpm1();
+      vx *= fraction;
+      vy *= fraction;
+      vz *= fraction;
+    }
+    if (dir_smear) {
+      double vv, dx, dy, dz;
+      vv = sqrt(vx * vx + vy * vy + vz * vz);
+      dx = vx / vv;
+      dy = vy / vv;
+      dz = vz / vv;
+      randvec_target_circle(&dx, &dy, &dz, NULL, dx, dy, dz, sin(dir_smear * DEG2RAD));
+      NORM(dx, dy, dz);
+      vx = dx * vv;
+      vy = dy * vv;
+      vz = dz * vv;
+    }
+  }
   SCATTER;
 %}
 
@@ -225,15 +253,19 @@ SAVE
   #ifndef OPENACC
   if (!preload) mcpl_close_file(inputfile);
   #endif
+  if (particles != NULL) free(particles);
 %}
 
 FINALLY
 %{
+if (times_replayed && E_smear == 0 && pos_smear == 0 && dir_smear == 0){
+  printf("Warning(%s): Forced to replay particle %d time(s) without smearing\n", times_replayed);
+}
 #if defined (USE_MPI)
-  long long accumulated[2], distributed[2];
+  uint64_t accumulated[2], distributed[2];
   distributed[0] = used_neutrons;
   distributed[1] = read_neutrons;
-  MPI_Reduce(&distributed, &accumulated, 2, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&distributed, &accumulated, 2, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
 if (mpi_node_rank == 0){
   used_neutrons = accumulated[0];
   read_neutrons = accumulated[1];
