@@ -1,14 +1,9 @@
-# Component definition file Template Repository
+# Alternate MCPL input component for McStas
+The original `MCPL_input.comp` MCPL input component is not suitable for use-cases where the runtime is more important
+that the simulation fidelity.
+When run under MPI, it re-uses the same input particle list for all nodes -- so if the input file has 1M particles
+and the MPI setup has 6 nodes, a total of 6M particles will be used independent of any command-line particle-count switch.
 
-The `McStas`/`McXtrace` code generator [`mccode-antlr`](https://github.com/McStasMcXtrace/mccode-antlr.git) can use [`pooch`](https://github.com/fantiando/pooch.git) to fetch component definition files from GitHub repositories which containan appropriate `pooch` registry file.
-The registry file is a listing of (component) filename and file hash pairs, and should be updated whenever a file changes.
-Rather than calculating and updating the hashes in the registry by hand, this template includes a GitHub Actions workflow to keep the file up to date for you.
-
-You may need to modify either the Python script which produces the file,
-located at `.github/register.py`,
-or the workflow, `.github/workflows/register.yml`,
-to produce the registry file for your use case.
-
-## Workflow permissions
-You may need to modify the permissions granted to workflow files in your cloned repository.
-Under `Workflow permissions` at [settings/actions](../../settings/actions) ensure that `Read and write permissions` is selected.
+This component is intended to be a drop-in replacement, except that it divides the file particles
+into approximately equal chunks between MPI nodes. And that `repeat` is removed, in favor of using the user-provided
+neutron count; with repeating implied if the requested number exceeds the file's contained particle count.
