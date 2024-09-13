@@ -170,7 +170,7 @@ INITIALIZE
 TRACE
 %{
   mcpl_input_once_particle_t * ptr;
-  ptr = NULL;
+  ptr = preload ? NULL : (mcpl_input_once_particle_t *) calloc(1, sizeof(mcpl_input_once_particle_t));
   
   if (index >= maximum_index){
     // go back to the start of this worker's particles, rather than accessing out-of-range data
@@ -222,6 +222,9 @@ TRACE
   t = ptr->_t;
   p = ptr->_p;
   
+  // done with the mcpl_input_once_particle_t pointer -- free it if not pointing into the particles list
+  if (!preload && ptr != NULL) free(ptr);
+  
   if (always_smear || times_replayed){
     // fuzz the input
     if (pos_smear) {
@@ -266,8 +269,11 @@ SAVE
 FINALLY
 %{
 if (times_replayed && v_smear == 0 && pos_smear == 0 && dir_smear == 0){
-  printf("Warning(%s): Forced to replay particle %d time(s) without smearing\n", times_replayed);
+  printf("Warning(%s): Forced to replay particle list %d time(s) without smearing\n", NAME_CURRENT_COMP, times_replayed);
 }
+  char message[256];
+  message[0] = '\0';
+
 #if defined (USE_MPI)
   uint64_t accumulated[3], distributed[3];
   distributed[0] = used_neutrons;
@@ -278,6 +284,7 @@ if (mpi_node_rank == 0){
   used_neutrons = accumulated[0];
   read_neutrons = accumulated[1];
   emitted_neutrons = accumulated[2];
+  sprintf(message, " the %d MPI node copies of", mpi_node_count);
 #endif
   long long ncount = mcget_ncount();
   long unsigned un = (long unsigned) used_neutrons;
@@ -289,10 +296,13 @@ if (mpi_node_rank == 0){
   if (ncount != used_neutrons){
     long unsigned nc = (long unsigned) ncount;
     long unsigned np = (long unsigned) nparticles;
-    fprintf(stderr,"Warning (%s): You requested %lu neutrons from a file which contains %lu particles in general,\n"
-                                "of which only %lu are neutrons within the wanted energy interval.\n"
-                                "%lu neutrons were emitted by (all MPI node copies of) this component. "
-                                "Please examine the recorded intensities carefully.\n", NAME_CURRENT_COMP, nc, np, un, en);
+    fprintf(stderr,
+    "Warning (%s): You requested %lu neutrons from a file which contains %lu particles in general,\n"
+    "              of which only %lu are neutrons within the wanted energy interval.\n"
+    "              %lu neutrons were emitted by%s this component.\n"
+    "              Please examine the recorded intensities carefully.\n", 
+    NAME_CURRENT_COMP, nc, np, un, message, en
+    );
   }
 #if defined (USE_MPI)
 }
