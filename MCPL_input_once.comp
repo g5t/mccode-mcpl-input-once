@@ -166,7 +166,7 @@ INITIALIZE
   total_index = maximum_index;
 #if defined (USE_MPI)
   // add up the read neutrons (or to be read neutrons) from each node
-  MPI_Reduce(&maxium_index, &total_index, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&maximum_index, &total_index, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
   // tell all nodes the value, so they can set ncount for themselves
   MPI_Bcast(&total_index, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 #endif
