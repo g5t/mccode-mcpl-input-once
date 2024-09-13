@@ -162,15 +162,14 @@ INITIALIZE
   // and the total number of neutrons emitted by this component
   emitted_neutrons = 0;
   // Determine the total number of read (or to be read) neutrons
-  uint64_t total_index;
-  total_index = maximum_index;
+  uint64_t total_index = maximum_index;
 #if defined (USE_MPI)
   // add up the read neutrons (or to be read neutrons) from each node
   MPI_Reduce(&maximum_index, &total_index, 1, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
   // tell all nodes the value, so they can set ncount for themselves
   MPI_Bcast(&total_index, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 #endif
-  mcset_ncount(maximum_index); // will be divided by mpi_node_count before starting the raytrace
+  mcset_ncount(total_index); // will be divided by mpi_node_count before starting the raytrace
 %}
 
 TRACE
@@ -277,8 +276,8 @@ FINALLY
 if (times_replayed && v_smear == 0 && pos_smear == 0 && dir_smear == 0){
   printf("Warning (%s): Forced to replay particle list %d time(s) without smearing\n", NAME_CURRENT_COMP, times_replayed);
 }
-  char message[256];
-  message[0] = '\0';
+  char mpi_nodes_message[256];
+  mpi_nodes_message[0] = '\0';
   uint64_t requested_neutrons = (uint64_t) mcget_ncount();
 
 #if defined (USE_MPI)
@@ -293,22 +292,21 @@ if (mpi_node_rank == 0){
   read_neutrons = accumulated[1];
   emitted_neutrons = accumulated[2];
   requested_neutrons = accumulated[3];
-  sprintf(message, "he %d MPI node copies of t", mpi_node_count);
+  sprintf(mpi_nodes_message, "he %d MPI node copies of t", mpi_node_count);
 #endif
-  long unsigned un = (long unsigned) used_neutrons;
-  long unsigned rn = (long unsigned) read_neutrons;
   if (used_neutrons!=read_neutrons){
-    fprintf(stdout,"Message(%s): You have used %lu of %lu neutrons available in the MCPL file.\n", NAME_CURRENT_COMP, un, rn);
+    fprintf(stdout,"Message(%s): You have used %lu of %lu neutrons available in the MCPL file.\n", NAME_CURRENT_COMP, used_neutrons, read_neutrons);
   }
   if (requested_neutrons != used_neutrons){
-    long unsigned nc = (long unsigned) requested_neutrons;
-    long unsigned np = (long unsigned) nparticles;
-    long unsigned en = (long unsigned) emitted_neutrons;
+    char bad_particle_message[512];
+    bad_particle_message[0] = '\0';
+    if (used_neutrons != nparticles){
+      sprintf(bad_particle_message, " (of which %lu are neutrons within the requested energy interval)", used_neutrons);
+    }
     fprintf(stderr,
-    "Warning (%s): You requested %lu neutrons from a file which contains %lu particles in general,\n"
-    " of which only %lu are neutrons within the wanted energy interval.\n"
+    "Warning (%s): You requested %lu neutrons from a file which contains %lu particles in general%s."
     " T%shis component emitted %lu neutrons in total. Please examine the recorded intensities carefully.\n", 
-    NAME_CURRENT_COMP, nc, np, un, message, en
+    NAME_CURRENT_COMP, requested_neutrons, nparticles, bad_particle_message, mpi_nodes_message, emitted_neutrons
     );
   }
 #if defined (USE_MPI)
