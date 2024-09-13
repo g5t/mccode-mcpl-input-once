@@ -30,13 +30,14 @@
 * pos_smear: [m]        Maximum extent of random position for replayed particles
 * dir_smear: [deg]      Maximum deviation of random direction for replayed particles
 * always_smear: [ ]     Finite values force particle property smearing for all particles
+* verbose: [ ]          Finite values may cause extra output (at some point in the future)
 *
 * %E
 *******************************************************************************/
 
 DEFINE COMPONENT MCPL_input_once
 DEFINITION PARAMETERS ()
-SETTING PARAMETERS (string filename=0, polarisationuse=1, Emin=0, Emax=FLT_MAX, v_smear=0, pos_smear=0, dir_smear=0, int always_smear=0, int preload=0)
+SETTING PARAMETERS (string filename=0, polarisationuse=1, Emin=0, Emax=FLT_MAX, v_smear=0, pos_smear=0, dir_smear=0, int always_smear=0, int preload=0, int verbose=0)
 OUTPUT PARAMETERS ()
 DEPENDENCY "-Wl,-rpath,CMD(mcpl-config --show libdir) -LCMD(mcpl-config --show libdir) -lmcpl -ICMD(mcpl-config --show includedir)"
 
@@ -83,7 +84,7 @@ uint64_t nparticles;
 uint64_t read_neutrons;
 uint64_t used_neutrons;
 uint64_t emitted_neutrons;
-uint64_t index;
+uint64_t current_index;
 uint64_t maximum_index;
 uint64_t first_particle;
 int times_replayed;
@@ -134,7 +135,7 @@ INITIALIZE
   // in preparation for pre-loading or first pass through TRACE
   mcpl_seek(inputfile, first_particle);
   // Index will track how many particles this component has accessed
-  index = 0;
+  current_index = 0;
   // Which we want to check against how large it can grow, to know if we've exhausted the available particles
   maximum_index = last_particle - first_particle;
   particles = NULL;
@@ -177,9 +178,9 @@ TRACE
   mcpl_input_once_particle_t * ptr;
   ptr = preload ? NULL : (mcpl_input_once_particle_t *) calloc(1, sizeof(mcpl_input_once_particle_t));
   
-  if (index >= maximum_index){
+  if (current_index >= maximum_index){
     // go back to the start of this worker's particles, rather than accessing out-of-range data
-    index = 0;
+    current_index = 0;
     if (!preload){
       mcpl_seek(inputfile, first_particle);
     }
@@ -190,7 +191,7 @@ TRACE
   if (!preload){
     const mcpl_particle_t *particle;// = (mcpl_particle_t *) calloc(sizeof(mcpl_particle_t),1);
     particle = mcpl_read(inputfile);
-    index++; // track how many particles have been accessed, to ensure we don't exceed our slice of the file
+    current_index++; // track how many particles have been accessed, to ensure we don't exceed our slice of the file
     if (!particle || particle->pdgcode != 2112) {
        ABSORB;
     }
@@ -204,7 +205,7 @@ TRACE
     if (!times_replayed) used_neutrons++;
   } else {
 #endif
-    ptr = particles + index++;
+    ptr = particles + current_index++;
 #ifndef OPENACC
   }
 #endif
