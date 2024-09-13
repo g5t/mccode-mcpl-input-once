@@ -45,30 +45,34 @@ SHARE
 #include <mcpl.h>
 
 typedef struct {
-  double x, y, z;
-  double sx, sy, sz;
-  double vx, vy, vz;
-  double e, t, p;
+  // Prefixed names to avoid the _particle accessor macros 
+  double _x, _y, _z;
+  double _vx, _vy, _vz;
+  double _sx, _sy, _sz;
+  // insert [int, void*, int, double, double, double, unsigned long]
+  // here in order to have matching memory layout with 
+  // _struct_particle, e.g., _class_particle
+  double _t, _p;
 } mcpl_input_once_particle_t;
 
-void mcpl_input_once_translator(const int use_polarisation, const mcpl_particle_t * input, const mcpl_input_once_particle_t * output){
+void mcpl_input_once_translator(const int use_polarisation, const mcpl_particle_t * input, mcpl_input_once_particle_t * output){
   // position in mm -> m
-  output->x = input->position[0] / 100;
-  output->y = input->position[1] / 100;
-  output->z = input->position[2] / 100;
-  // polarization is a direction, and we might ignore it
-  output->sx = (use_polarisation) ? input->polarisation[0] : 0;
-  output->sy = (use_polarisation) ? input->polarisation[1] : 0;
-  output->sz = (use_polarisation) ? input->polarisation[2] : 0;
+  output->_x = input->position[0] / 100;
+  output->_y = input->position[1] / 100;
+  output->_z = input->position[2] / 100;
   // ekin in MeV -> meV; then to velocity
   double nrm = sqrt(input->ekin  * 1e9 / VS2E); 
-  output->vx = input->direction[0] * nrm;
-  output->vy = input->direction[1] * nrm;
-  output->vz = input->direction[2] * nrm;
+  output->_vx = input->direction[0] * nrm;
+  output->_vy = input->direction[1] * nrm;
+  output->_vz = input->direction[2] * nrm;
+  // polarization is a direction, and we might ignore it
+  output->_sx = (use_polarisation) ? input->polarisation[0] : 0;
+  output->_sy = (use_polarisation) ? input->polarisation[1] : 0;
+  output->_sz = (use_polarisation) ? input->polarisation[2] : 0;
   // time in msec -> sec
-  output->t = input->time  * 1e-3;
+  output->_t = input->time  * 1e-3;
   // probability, unitless
-  output->p = input->weight;
+  output->_p = input->weight;
 }
 %}
 
@@ -139,9 +143,8 @@ INITIALIZE
   particles = NULL;
   if (preload) {
     printf("Preload requested, loading MCPLfile particles (%lu, %lu] in INITIALIZE\n", (long unsigned)first_particle, (long unsigned)last_particle);
-    long long no = last_particle - first_particle;
-    particles = (mcpl_input_once_particle_t *) calloc(no, sizeof(mcpl_input_once_particle_t);
-    for (long long loop=first_particle; loop < last_particle ; loop++) {
+    particles = (mcpl_input_once_particle_t *) calloc(last_particle - first_particle, sizeof(mcpl_input_once_particle_t));
+    for (uint64_t loop=first_particle; loop < last_particle ; loop++) {
       const mcpl_particle_t *particle;
       particle=mcpl_read(inputfile);
       if (particle && particle->pdgcode==2112) {
@@ -171,7 +174,7 @@ TRACE
     // go back to the start of this worker's particles, rather than accessing out-of-range data
     index = 0;
     if (!preload){
-      mpl_seek(inputfile, first_particle);
+      mcpl_seek(inputfile, first_particle);
     }
     times_replayed++;
   }
@@ -202,17 +205,17 @@ TRACE
     exit(-1);
   }
   // this could be done via memcpy if we ensure equal memory layout with the ray's struct
-  x = ptr->x;
-  y = ptr->y;
-  z = ptr->z;
-  sx = ptr->sx;
-  sy = ptr->sy;
-  sz = ptr->sz;
-  vx = ptr->vx;
-  vy = ptr->vy;
-  vz = ptr->vz;
-  t = ptr->t;
-  p = ptr->p;
+  x = ptr->_x;
+  y = ptr->_y;
+  z = ptr->_z;
+  sx = ptr->_sx;
+  sy = ptr->_sy;
+  sz = ptr->_sz;
+  vx = ptr->_vx;
+  vy = ptr->_vy;
+  vz = ptr->_vz;
+  t = ptr->_t;
+  p = ptr->_p;
   
   if (always_smear || times_replayed){
     // fuzz the input
