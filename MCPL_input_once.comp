@@ -26,7 +26,7 @@
 * polarisationuse: [ ]  If !=0 read polarisation vectors from file.
 * Emin: [meV]           Lower energy bound. Particles found in the MCPL-file below the limit are skipped.
 * Emax: [meV]           Upper energy bound. Particles found in the MCPL-file above the limit are skipped.
-* E_smear: [1]          Relative fraction for randomness in replayed particle velocity v *= (1 + E_smear * randpm1())
+* v_smear: [1]          Relative fraction for randomness in replayed particle velocity v *= (1 + v_smear * randpm1())
 * pos_smear: [m]        Maximum extent of random position for replayed particles
 * dir_smear: [deg]      Maximum deviation of random direction for replayed particles
 * always_smear: [ ]     Finite values force particle property smearing for all particles
@@ -36,7 +36,7 @@
 
 DEFINE COMPONENT MCPL_input_once
 DEFINITION PARAMETERS ()
-SETTING PARAMETERS (string filename=0, polarisationuse=1, Emin=0, Emax=FLT_MAX, E_smear=0, pos_smear=0, dir_smear=0, int always_smear=0, int preload=0)
+SETTING PARAMETERS (string filename=0, polarisationuse=1, Emin=0, Emax=FLT_MAX, v_smear=0, pos_smear=0, dir_smear=0, int always_smear=0, int preload=0)
 OUTPUT PARAMETERS ()
 DEPENDENCY "-Wl,-rpath,CMD(mcpl-config --show libdir) -LCMD(mcpl-config --show libdir) -lmcpl -ICMD(mcpl-config --show includedir)"
 
@@ -224,10 +224,9 @@ TRACE
       y += tmpy * pos_smear * rand01();
       z += tmpz * pos_smear * rand01();
     }
-    if (E_smear) {
-      // copy behavior of MCPL_input.comp -- E_smear controls *velocity* randomness
+    if (v_smear) {
       double fraction;
-      fraction = 1.0 + E_smear * randpm1();
+      fraction = 1.0 + v_smear * randpm1();
       vx *= fraction;
       vy *= fraction;
       vz *= fraction;
@@ -258,7 +257,7 @@ SAVE
 
 FINALLY
 %{
-if (times_replayed && E_smear == 0 && pos_smear == 0 && dir_smear == 0){
+if (times_replayed && v_smear == 0 && pos_smear == 0 && dir_smear == 0){
   printf("Warning(%s): Forced to replay particle %d time(s) without smearing\n", times_replayed);
 }
 #if defined (USE_MPI)
