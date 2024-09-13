@@ -150,7 +150,6 @@ INITIALIZE
       if (particle && particle->pdgcode==2112) {
         if (particle->ekin>Emin*1e-9 && particle->ekin<Emax*1e-9 ) {
           mcpl_input_once_translator(polarisationuse, particle, particles + used_neutrons++);
-          used_neutrons++;
         }
         read_neutrons++;
       }
