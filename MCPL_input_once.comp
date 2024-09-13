@@ -82,6 +82,7 @@ mcpl_file_t inputfile;
 long long nparticles;
 uint64_t read_neutrons;
 uint64_t used_neutrons;
+uint64_t emitted_neutrons;
 uint64_t index;
 uint64_t maximum_index;
 uint64_t first_particle;
@@ -114,7 +115,6 @@ INITIALIZE
     );
 #endif
   }
-  mcset_ncount(nparticles);
   first_particle = 0;
   last_particle = (uint64_t) nparticles;
 #if defined (USE_MPI)
@@ -155,14 +155,16 @@ INITIALIZE
         read_neutrons++;
       }
     }
-    // keep track of 
+    // keep track of how many particles are available to us in the `particles` array
     maximum_index = used_neutrons;
-    printf("Done reading MCPL file (%lu, %lu], found %lu neutrons\n",
-           (long unsigned)first_particle, (long unsigned)last_particle, (long unsigned)read_neutrons);
+    printf("Done reading MCPL file (%lu, %lu], found %lu neutrons (and kept %lu)\n",
+           (long unsigned)first_particle, (long unsigned)last_particle, (long unsigned)read_neutrons, (long unsigned)used_neutrons);
     mcpl_close_file(inputfile);
   }
   // keep track of how many times we had to replay the same MCPL input
   times_replayed = 0;
+  // and the total number of neutrons emitted by this component
+  emitted_neutrons = 0;
 %}
 
 TRACE
@@ -187,12 +189,14 @@ TRACE
     if (!particle || particle->pdgcode != 2112) {
        ABSORB;
     }
-    read_neutrons++;
+    // keep track of how many neutrons have been read; but only on the first replay
+    if (!times_replayed) read_neutrons++;
     if ( particle->ekin<Emin*1e-9 || particle->ekin>Emax*1e-9 ) {
         ABSORB;
     }
     mcpl_input_once_translator(polarisationuse, particle, ptr);
-    used_neutrons++;
+    // And how many of the read neutrons actually get used
+    if (!times_replayed) used_neutrons++;
   } else {
 #endif
     ptr = particles + index++;
@@ -204,16 +208,17 @@ TRACE
     fprintf(stderr, "ERROR (%s): component particle struct pointer not set! Crash before out-of-bounds memory access.\n", NAME_CURRENT_COMP);
     exit(-1);
   }
+  emitted_neutrons++;
   // this could be done via memcpy if we ensure equal memory layout with the ray's struct
   x = ptr->_x;
   y = ptr->_y;
   z = ptr->_z;
-  sx = ptr->_sx;
-  sy = ptr->_sy;
-  sz = ptr->_sz;
   vx = ptr->_vx;
   vy = ptr->_vy;
   vz = ptr->_vz;
+  sx = ptr->_sx;
+  sy = ptr->_sy;
+  sz = ptr->_sz;
   t = ptr->_t;
   p = ptr->_p;
   
@@ -264,17 +269,20 @@ if (times_replayed && v_smear == 0 && pos_smear == 0 && dir_smear == 0){
   printf("Warning(%s): Forced to replay particle %d time(s) without smearing\n", times_replayed);
 }
 #if defined (USE_MPI)
-  uint64_t accumulated[2], distributed[2];
+  uint64_t accumulated[3], distributed[3];
   distributed[0] = used_neutrons;
   distributed[1] = read_neutrons;
-  MPI_Reduce(&distributed, &accumulated, 2, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+  distributed[2] = emitted_neutrons;
+  MPI_Reduce(&distributed, &accumulated, 3, MPI_UINT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
 if (mpi_node_rank == 0){
   used_neutrons = accumulated[0];
   read_neutrons = accumulated[1];
+  emitted_neutrons = accumulated[2];
 #endif
   long long ncount = mcget_ncount();
   long unsigned un = (long unsigned) used_neutrons;
   long unsigned rn = (long unsigned) read_neutrons;
+  long unsigned en = (long unsigned) emitted_neutrons;
   if (used_neutrons!=read_neutrons){
     fprintf(stdout,"Message(%s): You have used %lu of %lu neutrons available in the MCPL file.\n", NAME_CURRENT_COMP, un, rn);
   }
@@ -282,8 +290,9 @@ if (mpi_node_rank == 0){
     long unsigned nc = (long unsigned) ncount;
     long unsigned np = (long unsigned) nparticles;
     fprintf(stderr,"Warning (%s): You requested %lu neutrons from a file which contains %lu particles in general,\n"
-                                "of which only %lu are neutrons (within the wanted energy interval).\n"
-                                "Please examine the recorded intensities carefully.\n", NAME_CURRENT_COMP, nc, np, un);
+                                "of which only %lu are neutrons within the wanted energy interval.\n"
+                                "%lu neutrons were emitted by (all MPI node copies of) this component. "
+                                "Please examine the recorded intensities carefully.\n", NAME_CURRENT_COMP, nc, np, un, en);
   }
 #if defined (USE_MPI)
 }
